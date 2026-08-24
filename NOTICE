@@ -1,0 +1,38 @@
+abc-bottle-gym
+Copyright the abc-bottle-gym contributors.
+
+This project is a standalone, torch/MJWarp-free extraction of the
+"put bottles in bin" MuJoCo task from the ABC project
+(https://github.com/amazon-far/abc, https://abc.bot), licensed under the
+Apache License, Version 2.0 (see LICENSE). Scene/task Python code
+(src/abc_bottle_gym/config.py, scene.py, env.py) is adapted from
+`abc_minimal/config.py` and `abc_minimal/eval_policy.py` in that project;
+the physics, scene-randomization, and success-metric logic is reproduced
+with the same numerical behavior. Rendering was reimplemented on top of
+`mujoco.Renderer`/`mujoco.viewer` in place of the original's GPU-only MJWarp
++ viser stack, which is not required to test the task itself.
+
+If you use this environment or the underlying task, please cite the
+original work:
+
+  @misc{abc2026,
+    title         = {Scalable Behavior Cloning with Open Data, Training, and Evaluation},
+    author        = {Arthur Allshire and Himanshu Gaurav Singh and Ritvik Singh and Adam Rashid and Hongsuk Choi and David McAllister and Justin Yu and Yiyuan Chen and Huang Huang and Pieter Abbeel and Xi Chen and Rocky Duan and Phillip Isola and Jitendra Malik and Fred Shentu and Guanya Shi and Philipp Wu and Angjoo Kanazawa},
+    year          = {2026},
+    eprint        = {2606.27375},
+    archivePrefix = {arXiv},
+    primaryClass  = {cs.RO},
+    doi           = {10.48550/arXiv.2606.27375},
+    url           = {https://arxiv.org/abs/2606.27375},
+  }
+
+Third-party assets bundled under src/abc_bottle_gym/assets/assets/i2rt_yam/
+(the YAM robot arm MuJoCo model and meshes) are from i2rt robotics
+(https://github.com/i2rt-robotics), licensed MIT. The original license text
+is retained at src/abc_bottle_gym/assets/assets/i2rt_yam/LICENSE and mirrored
+at third_party_licenses/i2rt_yam_LICENSE.
+
+The bottle and bin (task_water_bottles) meshes under
+src/abc_bottle_gym/assets/assets/task_water_bottles/ are reproduced as
+bundled in the upstream ABC repository under its Apache-2.0 LICENSE; no
+separate third-party notice was present upstream for these assets.
