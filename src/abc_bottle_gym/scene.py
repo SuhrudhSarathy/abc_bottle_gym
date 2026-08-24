@@ -118,6 +118,14 @@ def scene_xml(scene: PutBottlesSimConfig, bottle_scales: np.ndarray, bin_scale: 
     if compiler is not None:
         compiler.set("meshdir", str((ASSETS_ROOT / "assets").resolve()))
         compiler.set("texturedir", str((ASSETS_ROOT / "assets").resolve()))
+    # put_bottle.xml's "home" keyframe only specifies qpos for the arm/gripper
+    # DOFs, not the bin/bottle freejoints appended below -- MuJoCo requires an
+    # exact-length qpos per keyframe, so a partial one fails to compile. The
+    # env never reads this keyframe (PutBottlesEnv.reset sets qpos manually
+    # via _set_state/_set_freejoint), so it's safe to drop entirely.
+    keyframe = root.find("keyframe")
+    if keyframe is not None:
+        root.remove(keyframe)
     for mesh in root.findall("./asset/mesh"):
         name = mesh.get("name", "")
         scale = np.asarray([float(v) for v in mesh.get("scale", "1 1 1").split()], dtype=np.float64)
