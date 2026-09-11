@@ -1,16 +1,19 @@
 abc-bottle-gym
 Copyright the abc-bottle-gym contributors.
 
-This project is a standalone, torch/MJWarp-free extraction of the
-"put bottles in bin" MuJoCo task from the ABC project
-(https://github.com/amazon-far/abc, https://abc.bot), licensed under the
-Apache License, Version 2.0 (see LICENSE). Scene/task Python code
-(src/abc_bottle_gym/config.py, scene.py, env.py) is adapted from
-`abc_minimal/config.py` and `abc_minimal/eval_policy.py` in that project;
-the physics, scene-randomization, and success-metric logic is reproduced
-with the same numerical behavior. Rendering was reimplemented on top of
-`mujoco.Renderer`/`mujoco.viewer` in place of the original's GPU-only MJWarp
-+ viser stack, which is not required to test the task itself.
+This project is a standalone, torch-free extraction of the "put bottles in
+bin" MuJoCo task from the ABC project (https://github.com/amazon-far/abc,
+https://abc.bot), licensed under the Apache License, Version 2.0 (see
+LICENSE). Scene/task Python code (src/abc_bottle_gym/config.py, scene.py,
+env.py, sim.py) is adapted from `abc_minimal/config.py` and
+`abc_minimal/eval_policy.py` in that project; the physics, rendering,
+scene-randomization, and success-metric logic is reproduced unmodified in
+substance, running on the same MuJoCo-Warp (`mujoco-warp` + `warp-lang`)
+GPU simulator/renderer the original uses by default, to avoid the
+distribution shift a different renderer would introduce for any policy
+trained on MJWarp-rendered images. `torch`, the DiT policy, CLIP, DINOv3,
+and `viser` (all needed only to load/run a trained policy, not the
+environment itself) were dropped.
 
 If you use this environment or the underlying task, please cite the
 original work:

@@ -8,50 +8,67 @@ into a bin.
 
 This package extracts just the task/simulation from ABC's
 `abc_minimal/eval_policy.py` so it can be installed and tested by anyone with
-`pip`/`uv` and MuJoCo — no CUDA, no `torch`, no `mujoco-warp`/`warp-lang`,
-no `viser`, no pretrained checkpoint required.
+`pip`/`uv`, without `torch`, the DiT policy, CLIP, DINOv3, `viser`, or a
+pretrained checkpoint.
 
-## What matches the original, and what doesn't
+**This requires an NVIDIA GPU with a working CUDA driver.** Physics and
+rendering both run on MuJoCo-Warp (`mujoco-warp` + `warp-lang`), the same
+GPU simulator/renderer the upstream project uses by default for policy
+training and eval. There is no CPU/native-MuJoCo fallback: native MuJoCo's
+rendering (lighting, antialiasing, shadows) looks different enough from
+MJWarp's that it's a real distribution-shift risk for any policy trained on
+MJWarp-rendered images — if you're evaluating a checkpoint, you want the
+exact renderer it was trained/tested against, not a lookalike.
 
-Matches exactly:
+## What matches the original
+
+Matches exactly — this is the same default (GPU) code path the original
+project runs, not a reimplementation:
 - Scene XML, meshes, and per-episode randomization (bottle scale/pose, bin
   scale/pose), driven by the same `numpy.random.Generator(seed)` logic as
   upstream — the same `seed` produces the same scene.
-- Physics: `mujoco.mj_step` at `timestep=0.002`,
-  `control_decimation=17` steps per action. This is exactly what the
-  upstream project calls its `--vanilla-physics` path, which its own README
-  recommends for single (non-batched) environments as physically equivalent
-  to its default GPU/MJWarp path.
+- Physics: MJWarp's single-world (`nworld=1`) GPU stepper at
+  `timestep=0.002`, `control_decimation=17` steps per action — the same
+  simulator, not `mujoco.mj_step`.
+- Rendering: MJWarp's GPU rasterizer via the same
+  `mujoco_warp.create_render_context` / `render` calls, same default
+  resolution (168x224).
 - The 14-dim state/action layout (per arm: 6 joint positions in radians +
   1 normalized gripper value in `[0, 1]`, left arm then right arm) and the
   success/reward metric (fraction of bottles resting inside the bin volume).
 
-Different by design:
-- Rendering uses MuJoCo's built-in `mujoco.Renderer` / `mujoco.viewer`
-  instead of the original's GPU-batched MJWarp renderer. Camera geometry and
-  scene content are identical, so views are visually equivalent — just not
-  bit-identical to MJWarp's rasterizer. MJWarp is built for batched
-  GPU training and adds nothing for testing the task itself.
-- No policy / DiT model / CLIP text encoder / DINOv3 vision backbone is
-  included — this package is the environment only. Bring your own policy
-  (random, scripted, RL-trained, or your own imitation-learning model) and
-  drive it through the standard Gymnasium `step`/`reset` API.
+No policy / DiT model / CLIP text encoder / DINOv3 vision backbone is
+included — this package is the environment only. Bring your own policy
+(random, scripted, RL-trained, or your own imitation-learning model) and
+drive it through the standard Gymnasium `step`/`reset` API.
+
+Note: GPU physics solvers are not bit-deterministic run-to-run (floating
+point reduction order varies), so `gymnasium`'s own `check_env` will warn
+that two rollouts from the same seed/actions are "similar" rather than
+exactly equal — this is expected GPU-solver behavior, not a bug in the
+scene/task logic (which *is* exactly reproducible; see `test_same_seed_is_deterministic`).
 
 ## Install
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # if you don't have uv
-git clone <this-repo-url> abc-bottle-gym
-cd abc-bottle-gym
+git clone git@github.com:SuhrudhSarathy/abc_bottle_gym.git
+cd abc_bottle_gym
 uv sync
 ```
 
-MuJoCo needs a rendering backend if you want camera images or the
-interactive viewer (`MUJOCO_GL=glfw` for on-screen, `egl` or `osmesa` for
-headless offscreen rendering). See the
-[MuJoCo docs](https://mujoco.readthedocs.io/en/stable/programming/index.html#using-opengl)
-if `import mujoco` or rendering fails on your machine — this is a MuJoCo
-requirement, unrelated to this package.
+Dependencies are pinned to the exact `mujoco`/`mujoco-warp`/`warp-lang`
+combination the upstream ABC project tests against (its `uv.lock`) — these
+three are versioned in lockstep, and drifting `mujoco-warp` ahead of
+`warp-lang` hits a real kernel-metadata bug in warp's caching of
+`mujoco-warp`'s dynamically-built collision kernels on repeated model
+rebuilds (which this env does every `reset()`). Don't bump them
+independently without retesting.
+
+The first `reset()`/`step()` in a process JIT-compiles MJWarp's CUDA
+kernels — this can take a few minutes the very first time (cached
+afterwards under `~/.cache/warp/`, and reused across scene/seed variations
+within the same process).
 
 ## Quick start
 
@@ -95,6 +112,7 @@ Constructor kwargs (`gym.make("PutBottlesInBin-v0", **kwargs)`):
 | `height`, `width` | `168`, `224` | camera resolution (matches upstream default) |
 | `max_episode_steps` | `1800` | truncation horizon |
 | `scene` | `PutBottlesSimConfig()` | override randomization ranges / task thresholds |
+| `gpu_id` | `None` | pin to a specific CUDA device index on multi-GPU machines |
 
 ## Examples
 

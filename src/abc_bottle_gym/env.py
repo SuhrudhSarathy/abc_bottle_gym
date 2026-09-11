@@ -1,24 +1,26 @@
 """Gymnasium environment for the ABC put-bottles-in-bin MuJoCo task.
 
 This is a standalone port of ``PutBottlesEnv`` from the ABC project's
-``abc_minimal/eval_policy.py``. It reproduces the original task exactly:
+``abc_minimal/eval_policy.py``. It reproduces the original's default
+(GPU/MJWarp) code path exactly:
 
 - Same scene XML, same per-episode randomization (bottle/bin scale, pose
   sampling), driven by the same ``numpy.random.Generator(seed)`` logic.
-- Same physics: ``mujoco.mj_step`` at ``timestep=0.002`` with
-  ``control_decimation=17`` steps per action -- identical to what the
-  original calls its ``--vanilla-physics`` path, which the upstream project
-  itself documents as the preferred (and physically equivalent) choice for
-  single, non-batched environments.
+- Same physics: MJWarp's ``mjw.step`` (single-world, ``nworld=1``) at
+  ``timestep=0.002`` with ``control_decimation=17`` steps per action --
+  the exact simulator the original project uses by default for policy
+  training/eval.
+- Same rendering: MJWarp's GPU rasterizer, via the same
+  ``mujoco_warp.create_render_context`` / ``render`` calls, at the same
+  default resolution (168x224).
 - Same 14-dim state/action layout (6 arm joints + 1 gripper, per arm) and the
   same success/reward metric (fraction of bottles inside the bin volume).
 
-The one intentional difference: camera frames are rendered with MuJoCo's
-built-in ``mujoco.Renderer`` rather than the GPU-batched MJWarp renderer the
-original uses for large-scale policy training. MJWarp/``warp-lang``/``viser``
-are CUDA-only, multi-hundred-MB dependencies that add nothing to testing the
-task itself, so they were dropped; scene geometry and camera placement are
-unchanged, so rendered views are visually equivalent, not bit-identical.
+This requires an NVIDIA GPU with a working CUDA driver (``mujoco_warp`` +
+``warp-lang``). There is deliberately no CPU/native-``mujoco`` fallback:
+native MuJoCo's renderer produces visibly different images (lighting,
+antialiasing, shadows) from MJWarp's, which is enough of a distribution
+shift to break a vision-conditioned policy trained on MJWarp rollouts.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from abc_bottle_gym.scene import (
     sample_bottle_pose,
     scene_xml,
 )
+from abc_bottle_gym.sim import MJWarpSim, require_mjwarp
 
 # Joint ranges copied from put_bottle.xml (dm4340: joints 1-3, dm4310: joints 4-6).
 # Position actuators use inheritrange="1", so ctrlrange == joint range exactly.
@@ -56,7 +59,7 @@ DEFAULT_PROMPT = "sim put the plastic bottles in the bin"
 
 
 class PutBottlesEnv(gym.Env):
-    """Bimanual YAM arms put loose bottles into a bin (MuJoCo, Gymnasium API)."""
+    """Bimanual YAM arms put loose bottles into a bin (MuJoCo-Warp, Gymnasium API)."""
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
@@ -70,8 +73,10 @@ class PutBottlesEnv(gym.Env):
         max_episode_steps: int = 1800,
         scene: PutBottlesSimConfig | None = None,
         prompt: str = DEFAULT_PROMPT,
+        gpu_id: int | None = None,
     ):
         super().__init__()
+        require_mjwarp()
         for cam in camera_keys:
             if cam not in ALL_CAMERA_KEYS:
                 raise ValueError(f"Unknown camera {cam!r}; choose from {ALL_CAMERA_KEYS}")
@@ -86,6 +91,7 @@ class PutBottlesEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.scene = scene or PutBottlesSimConfig()
         self.prompt = prompt
+        self.gpu_id = gpu_id
 
         self.action_space = spaces.Box(low=ACTION_LOW, high=ACTION_HIGH, dtype=np.float32)
         obs_spaces: dict[str, Any] = {
@@ -103,7 +109,7 @@ class PutBottlesEnv(gym.Env):
         self.model: mujoco.MjModel | None = None
         self.data: mujoco.MjData | None = None
         self.evaluator: PutBottlesEvaluator | None = None
-        self._renderer: mujoco.Renderer | None = None
+        self.sim: MJWarpSim | None = None
         self._viewer = None
         self.qpos_indices: list[int] = []
         self.ctrl_indices: list[int] = []
@@ -115,16 +121,16 @@ class PutBottlesEnv(gym.Env):
     # -- construction -----------------------------------------------------
 
     def _bind(self, xml: str) -> None:
+        if self.sim is not None:
+            self.sim.close()
+            self.sim = None
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.model.opt.timestep = self.scene.timestep
         self.data = mujoco.MjData(self.model)
         self.evaluator = PutBottlesEvaluator(self.model, self.scene)
-
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
-        if self.include_images:
-            self._renderer = mujoco.Renderer(self.model, height=self.height, width=self.width)
+        self.sim = MJWarpSim(
+            self.model, self.data, height=self.height, width=self.width, gpu_id=self.gpu_id
+        )
 
         self.qpos_indices, self.ctrl_indices, self.gripper_state_indices = [], [], set()
         idx = 0
@@ -200,6 +206,8 @@ class PutBottlesEnv(gym.Env):
             occupied.append((center, radius))
 
         mujoco.mj_forward(self.model, self.data)
+        self.sim.load_state()
+        self.sim.forward()
         self.evaluator.reset()
         self.randomization = {
             "seed": self._episode_seed,
@@ -214,19 +222,18 @@ class PutBottlesEnv(gym.Env):
             self._reset_human_viewer()
 
         obs = self._obs()
-        info = {"randomization": self.randomization, **self.evaluator.evaluate(self.data.qpos)}
+        info = {"randomization": self.randomization, **self.evaluator.evaluate(self.sim.qpos())}
         return obs, info
 
     def step(self, action: np.ndarray) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
         action = np.asarray(action, dtype=np.float32)
         if action.shape != self.action_space.shape:
             raise ValueError(f"action shape {action.shape} != {self.action_space.shape}")
-        self.data.ctrl[:] = self.action_to_ctrl(action)
-        for _ in range(self.scene.control_decimation):
-            mujoco.mj_step(self.model, self.data)
+        self.sim.set_ctrl(self.action_to_ctrl(action))
+        self.sim.step(self.scene.control_decimation)
         self._elapsed_steps += 1
 
-        task_eval = self.evaluator.evaluate(self.data.qpos)
+        task_eval = self.evaluator.evaluate(self.sim.qpos())
         obs = self._obs()
         reward = float(task_eval["reward"])
         terminated = bool(task_eval["ever_success"])
@@ -246,9 +253,9 @@ class PutBottlesEnv(gym.Env):
         return None
 
     def close(self) -> None:
-        if self._renderer is not None:
-            self._renderer.close()
-            self._renderer = None
+        if self.sim is not None:
+            self.sim.close()
+            self.sim = None
         if self._viewer is not None:
             self._viewer.close()
             self._viewer = None
@@ -256,7 +263,7 @@ class PutBottlesEnv(gym.Env):
     # -- task-specific helpers ------------------------------------------------
 
     def get_state(self) -> np.ndarray:
-        state = np.asarray(self.data.qpos[self.qpos_indices], dtype=np.float32).copy()
+        state = np.asarray(self.sim.qpos()[self.qpos_indices], dtype=np.float32)
         for i in self.gripper_state_indices:
             state[i] = float(np.clip(state[i] / self.scene.gripper_ctrl_max, 0.0, 1.0))
         return state
@@ -271,16 +278,17 @@ class PutBottlesEnv(gym.Env):
         return ctrl
 
     def render_cameras(self) -> dict[str, np.ndarray]:
-        if self._renderer is None:
-            self._renderer = mujoco.Renderer(self.model, height=self.height, width=self.width)
+        rgb = self.sim.render()
         images = {}
         for name in self.camera_keys:
-            self._renderer.update_scene(self.data, camera=name)
-            images[name] = self._renderer.render().transpose(2, 0, 1).copy()
+            cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+            if cam_id < 0:
+                raise ValueError(f"Camera not found: {name}")
+            images[name] = rgb[cam_id].transpose(2, 0, 1).copy()
         return images
 
     def evaluate(self) -> dict[str, Any]:
-        return self.evaluator.evaluate(self.data.qpos)
+        return self.evaluator.evaluate(self.sim.qpos())
 
     def _obs(self) -> dict[str, Any]:
         obs: dict[str, Any] = {"state": self.get_state()}
@@ -289,6 +297,15 @@ class PutBottlesEnv(gym.Env):
         return obs
 
     # -- interactive viewer -------------------------------------------------
+    #
+    # MJWarp steps physics on the GPU, so the CPU-side mujoco.MjData used by
+    # the (CPU/GLFW) passive viewer is stale between frames. Pull the latest
+    # qpos back and run a kinematics-only mj_forward before every sync so the
+    # viewer window reflects the current GPU state.
+
+    def _sync_data_from_sim(self) -> None:
+        self.data.qpos[:] = self.sim.qpos()
+        mujoco.mj_forward(self.model, self.data)
 
     def _reset_human_viewer(self) -> None:
         if self._viewer is not None:
@@ -296,9 +313,12 @@ class PutBottlesEnv(gym.Env):
             self._viewer = None
         import mujoco.viewer
 
+        self._sync_data_from_sim()
         self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
     def _sync_human_viewer(self) -> None:
         if self._viewer is None:
             self._reset_human_viewer()
+            return
+        self._sync_data_from_sim()
         self._viewer.sync()
